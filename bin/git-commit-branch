@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+
+usage() {
+    echo "Usage: git commit-branch <target-branch> [--rebase|-r] [ <git-commit-options>... ]"
+    echo ""
+    echo "Commits your staged changes to <target-branch>, discarding them from your current branch."
+    echo "Use --rebase or -r to rebase your current branch on the new commit in <target-branch>,"
+    echo "and thus include the changes in your current branch as well."
+    echo ""
+    echo "Example usage working on branch my-feature:"
+    echo "  git add some-file"
+    echo "  git commit-branch main --rebase -m 'Fixed a bug in some-file'"
+}
+
+if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+fi
+target_branch="$1"; shift # Remove first argument
+if ! git rev-parse --verify "$target_branch" >/dev/null; then
+    echo "fatal: '$target_branch' is not a branch in this git repository."
+    usage
+    exit 1
+fi
+
+rebase_command=''
+if [[ $# -gt 0 ]] && [[ "$1" == "-r" || "$1" == "--rebase" ]]; then
+    rebase_command="git rebase --quiet $target_branch"
+    shift # Remove -r/--rebase argument
+fi
+
+current_branch="$(git branch --show-current)"
+if ! [[ "$current_branch" ]]; then
+    echo "fatal: Unable to determine current branch. You must be on a branch to use git commit-branch."
+    exit 1
+fi
+
+commit_hash='not-committed-yet'
+print_error_message() {
+    set +x
+    echo
+    echo "Something went wrong in the last command. :-("
+    echo "Your unstaged changes and untracked files should be in the last stash."
+    echo "Your previously staged changes should be in the following commit: $commit_hash"
+    echo "Please check which commands were executed and try to undo them manually."
+    echo
+}
+
+echo "Committing your staged changes to branch '$target_branch'."
+trap 'print_error_message' ERR # Print some hopefully helpful info if something fails
+set -x # Print all executed commands
+git checkout --quiet 'HEAD~0' # Go into 'detached HEAD' state to avoid changing current branch
+git commit --quiet "$@" # Create temporary commit
+commit_hash="$(git rev-parse HEAD)" # Note temporary commit ID
+git stash push --include-untracked --quiet # Save all other changes from working tree
+git checkout --quiet "$target_branch" # Move to target branch
+git cherry-pick --quiet "$commit_hash" # Apply changes from temporary commit to target branch
+git checkout --quiet "$current_branch" # Switch back to current branch
+$rebase_command # Execute git rebase if --rebase flag is present
+git stash pop --quiet # Re-apply untracked changes to working tree
+set +x # Stop printing executed commands
+echo "Success."
+if ! [[ "$rebase_command" ]]; then
+    echo ""
+    echo "If you want to include those changes in your current branch, you can run:"
+    echo "  git stash; git rebase $target_branch; git stash pop"
+    echo "or"
+    echo "  git stash; git merge $target_branch; git stash pop"
+    echo ""
+fi
